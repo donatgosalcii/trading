@@ -1,0 +1,1151 @@
+import { useEffect, useState } from 'react'
+import './App.css'
+
+const STORAGE_KEY = 'sigma-sell-calculator'
+const QUOTE_API_ENDPOINT = 'https://www.alphavantage.co/query'
+const QUOTE_API_KEY = '59OVNKO3DEMVSCPQ'
+
+const SYMBOL_OPTIONS = [
+  'NVDA',
+  'AAPL',
+  'AMD',
+  'INTC',
+  'META',
+  'MSFT',
+  'SPY',
+  'TSLA',
+  'QQQ',
+  'CUSTOM',
+] as const
+
+const QUICK_SYMBOLS = ['NVDA', 'AMD', 'INTC', 'AAPL', 'TSLA', 'SPY'] as const
+const LEVERAGE_OPTIONS = ['4', '6'] as const
+const STRIKE_INCREMENT_OPTIONS = ['0.5', '1', '2.5', '5'] as const
+const MODE_OPTIONS = [
+  { value: 'put', label: 'Short put' },
+  { value: 'call', label: 'Covered call' },
+] as const
+
+type TradeMode = (typeof MODE_OPTIONS)[number]['value']
+
+type FormState = {
+  mode: TradeMode
+  capital: string
+  leverage: (typeof LEVERAGE_OPTIONS)[number]
+  usage: string
+  symbol: (typeof SYMBOL_OPTIONS)[number]
+  customSymbol: string
+  sharePrice: string
+  putAsk: string
+  callAsk: string
+  putBid: string
+  callBid: string
+  strikeIncrement: (typeof STRIKE_INCREMENT_OPTIONS)[number]
+}
+
+type PayoffPoint = {
+  price: number
+  value: number
+}
+
+type MarketCandle = {
+  open: number
+  close: number
+  high: number
+  low: number
+}
+
+type StrategyPanelProps = {
+  accent: TradeMode
+  title: string
+  subtitle: string
+  strike: number
+  rawTarget: number
+  contracts: number
+  effectiveContracts: number
+  usingPreviewContract: boolean
+  totalPremium: number
+  breakEven: number
+  maxGain: number
+  capitalUsed: number
+  capitalLeft: number
+  footnote: string
+  points: PayoffPoint[]
+  spot: number
+}
+
+type QuoteStatus = {
+  tone: 'idle' | 'loading' | 'success' | 'error'
+  text: string
+}
+
+const DEFAULT_FORM: FormState = {
+  mode: 'put',
+  capital: '25000',
+  leverage: '4',
+  usage: '60',
+  symbol: 'NVDA',
+  customSymbol: '',
+  sharePrice: '112.40',
+  putAsk: '2.18',
+  callAsk: '2.44',
+  putBid: '1.12',
+  callBid: '1.34',
+  strikeIncrement: '1',
+}
+
+const BACKDROP_CANDLES: MarketCandle[] = Array.from({ length: 34 }, (_, index) => {
+  const baseline =
+    96 +
+    index * 0.92 +
+    Math.sin(index / 2.7) * 4.9 -
+    Math.max(0, index - 23) * 0.92 +
+    Math.max(0, index - 34) * 1.45
+
+  const open = baseline + Math.sin(index * 1.35) * 1.65
+  const close = baseline + Math.cos(index * 1.08) * 1.9
+  const high = Math.max(open, close) + 1.8 + Math.abs(Math.sin(index * 0.88)) * 2.6
+  const low = Math.min(open, close) - 1.55 - Math.abs(Math.cos(index * 1.14)) * 2.35
+
+  return {
+    open: Number(open.toFixed(2)),
+    close: Number(close.toFixed(2)),
+    high: Number(high.toFixed(2)),
+    low: Number(low.toFixed(2)),
+  }
+})
+
+const currencyFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  maximumFractionDigits: 2,
+})
+
+const decimalFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
+const integerFormatter = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 0,
+})
+
+function parseNumber(value: string) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function clampPercentage(value: number) {
+  return Math.min(100, Math.max(0, value))
+}
+
+function roundDownToIncrement(value: number, increment: number) {
+  if (value <= 0 || increment <= 0) {
+    return 0
+  }
+
+  return Number((Math.floor(value / increment) * increment).toFixed(2))
+}
+
+function roundUpToIncrement(value: number, increment: number) {
+  if (value <= 0 || increment <= 0) {
+    return 0
+  }
+
+  return Number((Math.ceil(value / increment) * increment).toFixed(2))
+}
+
+function formatCurrency(value: number) {
+  return currencyFormatter.format(value)
+}
+
+function formatDecimal(value: number) {
+  return decimalFormatter.format(value)
+}
+
+function formatInteger(value: number) {
+  return integerFormatter.format(value)
+}
+
+function buildPayoffPoints(
+  start: number,
+  end: number,
+  steps: number,
+  payoff: (price: number) => number,
+) {
+  const safeEnd = end <= start ? start + 1 : end
+
+  return Array.from({ length: steps + 1 }, (_, index) => {
+    const price = start + ((safeEnd - start) * index) / steps
+    return {
+      price,
+      value: payoff(price),
+    }
+  })
+}
+
+function getInitialFormState() {
+  if (typeof window === 'undefined') {
+    return DEFAULT_FORM
+  }
+
+  try {
+    const savedState = window.localStorage.getItem(STORAGE_KEY)
+
+    if (!savedState) {
+      return DEFAULT_FORM
+    }
+
+    const parsedState = JSON.parse(savedState) as Partial<FormState>
+    return { ...DEFAULT_FORM, ...parsedState }
+  } catch {
+    window.localStorage.removeItem(STORAGE_KEY)
+    return DEFAULT_FORM
+  }
+}
+
+async function fetchSpotQuote(symbol: string, apiKey: string) {
+  const params = new URLSearchParams({
+    function: 'GLOBAL_QUOTE',
+    apikey: apiKey,
+    symbol,
+  })
+
+  const response = await fetch(`${QUOTE_API_ENDPOINT}?${params.toString()}`)
+  const payload = (await response.json()) as {
+    'Error Message'?: string
+    Information?: string
+    Note?: string
+    'Global Quote'?: {
+      '05. price'?: string
+    }
+  }
+
+  const rawPrice = payload['Global Quote']?.['05. price']
+  const apiMessage =
+    payload.Note ?? payload.Information ?? payload['Error Message']
+
+  if (!response.ok || apiMessage || typeof rawPrice !== 'string') {
+    throw new Error(apiMessage ?? 'Live spot quote is unavailable right now.')
+  }
+
+  const price = Number(rawPrice)
+
+  if (!Number.isFinite(price)) {
+    throw new Error('Live spot quote returned an invalid price.')
+  }
+
+  return price
+}
+
+function BackgroundMarketScene() {
+  const svgWidth = 1600
+  const svgHeight = 980
+  const padding = { top: 70, right: 36, bottom: 110, left: 36 }
+
+  const minPrice = Math.min(...BACKDROP_CANDLES.map((candle) => candle.low))
+  const maxPrice = Math.max(...BACKDROP_CANDLES.map((candle) => candle.high))
+  const plotWidth = svgWidth - padding.left - padding.right
+  const plotHeight = svgHeight - padding.top - padding.bottom
+  const candleStep = plotWidth / BACKDROP_CANDLES.length
+  const candleBodyWidth = Math.max(10, candleStep * 0.42)
+
+  const yScale = (price: number) =>
+    padding.top + ((maxPrice - price) / (maxPrice - minPrice)) * plotHeight
+
+  const gridRows = 7
+  const gridCols = 11
+  const horizontalGuides = Array.from({ length: gridRows }, (_, index) => {
+    const ratio = index / (gridRows - 1)
+    return padding.top + ratio * plotHeight
+  })
+  const verticalGuides = Array.from({ length: gridCols }, (_, index) => {
+    const ratio = index / (gridCols - 1)
+    return padding.left + ratio * plotWidth
+  })
+
+  const tracePath = BACKDROP_CANDLES.map((candle, index) => {
+    const x = padding.left + candleStep * index + candleStep / 2
+    const y = yScale(candle.close)
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
+  }).join(' ')
+
+  return (
+    <div className="market-backdrop" aria-hidden="true">
+      <div className="market-glow market-glow-hot" />
+      <div className="market-glow market-glow-positive" />
+
+      <svg
+        className="market-backdrop-svg"
+        viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+        preserveAspectRatio="xMidYMid slice"
+      >
+        {horizontalGuides.map((y, index) => (
+          <line
+            key={`row-${index}`}
+            className="market-grid-line"
+            x1={0}
+            x2={svgWidth}
+            y1={y}
+            y2={y}
+          />
+        ))}
+
+        {verticalGuides.map((x, index) => (
+          <line
+            key={`col-${index}`}
+            className="market-grid-line"
+            x1={x}
+            x2={x}
+            y1={0}
+            y2={svgHeight}
+          />
+        ))}
+
+        <path className="market-trace" d={tracePath} />
+
+        {BACKDROP_CANDLES.map((candle, index) => {
+          const x = padding.left + candleStep * index + candleStep / 2
+          const wickTop = yScale(candle.high)
+          const wickBottom = yScale(candle.low)
+          const bodyTop = yScale(Math.max(candle.open, candle.close))
+          const bodyBottom = yScale(Math.min(candle.open, candle.close))
+          const isUp = candle.close >= candle.open
+
+          return (
+            <g
+              key={index}
+              className={`market-candle-group ${isUp ? 'market-candle-up' : 'market-candle-down'}`}
+              style={{
+                animationDelay: `${index * 120}ms`,
+                animationDuration: `${5.6 + (index % 6) * 0.35}s`,
+              }}
+            >
+              <line
+                className="market-candle-wick"
+                x1={x}
+                x2={x}
+                y1={wickTop}
+                y2={wickBottom}
+              />
+              <rect
+                className="market-candle-body"
+                x={x - candleBodyWidth / 2}
+                y={bodyTop}
+                width={candleBodyWidth}
+                height={Math.max(bodyBottom - bodyTop, 7)}
+                rx={5}
+                ry={5}
+              />
+            </g>
+          )
+        })}
+      </svg>
+    </div>
+  )
+}
+
+function StrategyPanel({
+  accent,
+  title,
+  subtitle,
+  strike,
+  rawTarget,
+  contracts,
+  effectiveContracts,
+  usingPreviewContract,
+  totalPremium,
+  breakEven,
+  maxGain,
+  capitalUsed,
+  capitalLeft,
+  footnote,
+  points,
+  spot,
+}: StrategyPanelProps) {
+  const svgWidth = 500
+  const svgHeight = 238
+  const padding = { top: 18, right: 18, bottom: 34, left: 18 }
+
+  const minPrice = points[0]?.price ?? 0
+  const maxPrice = points.at(-1)?.price ?? 1
+  const values = points.map((point) => point.value)
+  const baseMinValue = Math.min(...values, 0)
+  const baseMaxValue = Math.max(...values, 0)
+  const yPadding = Math.max((baseMaxValue - baseMinValue) * 0.1, 120)
+  const minValue = baseMinValue - yPadding
+  const maxValue = baseMaxValue + yPadding
+
+  const xScale = (price: number) => {
+    if (maxPrice === minPrice) {
+      return padding.left
+    }
+
+    return (
+      padding.left +
+      ((price - minPrice) / (maxPrice - minPrice)) *
+        (svgWidth - padding.left - padding.right)
+    )
+  }
+
+  const yScale = (value: number) =>
+    padding.top +
+    ((maxValue - value) / (maxValue - minValue)) *
+      (svgHeight - padding.top - padding.bottom)
+
+  const linePath = points
+    .map((point, index) => {
+      const command = index === 0 ? 'M' : 'L'
+      return `${command} ${xScale(point.price).toFixed(2)} ${yScale(point.value).toFixed(2)}`
+    })
+    .join(' ')
+
+  const baselineY = Math.max(
+    padding.top,
+    Math.min(yScale(0), svgHeight - padding.bottom),
+  )
+
+  const areaPath = [
+    linePath,
+    `L ${xScale(maxPrice).toFixed(2)} ${baselineY.toFixed(2)}`,
+    `L ${xScale(minPrice).toFixed(2)} ${baselineY.toFixed(2)}`,
+    'Z',
+  ].join(' ')
+
+  const tone = accent === 'put' ? '#f35a73' : '#25d98b'
+  const referenceLines = [
+    {
+      key: 'spot',
+      label: 'Spot',
+      x: xScale(spot),
+      color: 'rgba(240, 241, 245, 0.34)',
+    },
+    {
+      key: 'strike',
+      label: 'Strike',
+      x: xScale(strike),
+      color:
+        accent === 'put'
+          ? 'rgba(243, 90, 115, 0.8)'
+          : 'rgba(37, 217, 139, 0.8)',
+    },
+  ]
+
+  return (
+    <article className={`strategy-panel strategy-panel-${accent}`}>
+      <div className="strategy-topline">
+        <div>
+          <p className="kicker">{subtitle}</p>
+          <h2>{title}</h2>
+        </div>
+        <p className="strategy-contract-label">
+          {usingPreviewContract
+            ? '1-contract preview'
+            : `${formatInteger(contracts)} contracts`}
+        </p>
+      </div>
+
+      <div className="strategy-strike-row">
+        <div>
+          <span>Target strike</span>
+          <strong>{formatCurrency(strike)}</strong>
+        </div>
+        <div>
+          <span>Raw 1-sigma target</span>
+          <strong>{formatCurrency(rawTarget)}</strong>
+        </div>
+      </div>
+
+      <div className="strategy-metrics">
+        <div>
+          <span>Contracts</span>
+          <strong>{formatInteger(contracts)}</strong>
+        </div>
+        <div>
+          <span>Premium received</span>
+          <strong>{formatCurrency(totalPremium)}</strong>
+        </div>
+        <div>
+          <span>Break-even</span>
+          <strong>{formatCurrency(breakEven)}</strong>
+        </div>
+        <div>
+          <span>Max gain</span>
+          <strong>{formatCurrency(maxGain)}</strong>
+        </div>
+        <div>
+          <span>Capital used</span>
+          <strong>{formatCurrency(capitalUsed)}</strong>
+        </div>
+        <div>
+          <span>Capital left</span>
+          <strong>{formatCurrency(capitalLeft)}</strong>
+        </div>
+      </div>
+
+      <div className="chart-wrap">
+        <svg
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          role="img"
+          aria-label={`${title} payoff chart`}
+        >
+          <defs>
+            <linearGradient
+              id={`gradient-${accent}`}
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="1"
+            >
+              <stop offset="0%" stopColor={tone} stopOpacity="0.34" />
+              <stop offset="100%" stopColor={tone} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+
+          <line
+            x1={padding.left}
+            x2={svgWidth - padding.right}
+            y1={baselineY}
+            y2={baselineY}
+            className="chart-zero-line"
+          />
+
+          {referenceLines.map((line) => (
+            <g key={line.key}>
+              <line
+                x1={line.x}
+                x2={line.x}
+                y1={padding.top}
+                y2={svgHeight - padding.bottom}
+                stroke={line.color}
+                strokeDasharray="5 6"
+                strokeWidth="1.25"
+              />
+              <text
+                x={line.x}
+                y={svgHeight - 10}
+                className="chart-label"
+                textAnchor="middle"
+              >
+                {line.label}
+              </text>
+            </g>
+          ))}
+
+          <path d={areaPath} fill={`url(#gradient-${accent})`} />
+          <path
+            d={linePath}
+            fill="none"
+            stroke={tone}
+            strokeWidth="3.2"
+            strokeLinecap="round"
+          />
+        </svg>
+      </div>
+
+      <div className="chart-footer">
+        <span>{formatCurrency(minPrice)}</span>
+        <span>Expiry stock price</span>
+        <span>{formatCurrency(maxPrice)}</span>
+      </div>
+
+      <p className="strategy-footnote">
+        {footnote}{' '}
+        {usingPreviewContract
+          ? `P/L preview uses ${formatInteger(effectiveContracts)} contract.`
+          : ''}
+      </p>
+    </article>
+  )
+}
+
+function App() {
+  const [form, setForm] = useState<FormState>(getInitialFormState)
+  const [quoteStatus, setQuoteStatus] = useState<QuoteStatus>({
+    tone: 'idle',
+    text: 'Live spot pulls are ready.',
+  })
+  const [isQuoteLoading, setIsQuoteLoading] = useState(false)
+
+  useEffect(() => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(form))
+  }, [form])
+
+  const capital = Math.max(0, parseNumber(form.capital))
+  const leverage = parseNumber(form.leverage)
+  const usage = clampPercentage(parseNumber(form.usage))
+  const sharePrice = Math.max(0, parseNumber(form.sharePrice))
+  const putAsk = Math.max(0, parseNumber(form.putAsk))
+  const callAsk = Math.max(0, parseNumber(form.callAsk))
+  const putBid = Math.max(0, parseNumber(form.putBid))
+  const callBid = Math.max(0, parseNumber(form.callBid))
+  const strikeIncrement = Math.max(0.5, parseNumber(form.strikeIncrement))
+
+  const symbol =
+    form.symbol === 'CUSTOM'
+      ? form.customSymbol.trim().toUpperCase() || 'CUSTOM'
+      : form.symbol
+
+  const totalBuyingPower = capital * leverage
+  const deployedBuyingPower = totalBuyingPower * (usage / 100)
+  const oneSigmaValue = putAsk + callAsk
+  const rawPutTarget = Math.max(0, sharePrice - oneSigmaValue)
+  const rawCallTarget = sharePrice + oneSigmaValue
+  const putStrike = roundDownToIncrement(rawPutTarget, strikeIncrement)
+  const callStrike = roundUpToIncrement(rawCallTarget, strikeIncrement)
+
+  const putContractBasis = putStrike * 100
+  const coveredCallContractBasis = sharePrice * 100
+  const putContracts =
+    putContractBasis > 0
+      ? Math.floor(deployedBuyingPower / putContractBasis)
+      : 0
+  const coveredCallContracts =
+    coveredCallContractBasis > 0
+      ? Math.floor(deployedBuyingPower / coveredCallContractBasis)
+      : 0
+
+  const putCapitalUsed = putContracts * putContractBasis
+  const coveredCallCapitalUsed = coveredCallContracts * coveredCallContractBasis
+  const putCapitalLeft = Math.max(0, deployedBuyingPower - putCapitalUsed)
+  const coveredCallCapitalLeft = Math.max(
+    0,
+    deployedBuyingPower - coveredCallCapitalUsed,
+  )
+
+  const putEffectiveContracts = Math.max(putContracts, 1)
+  const callEffectiveContracts = Math.max(coveredCallContracts, 1)
+  const putTotalPremium = putBid * 100 * putEffectiveContracts
+  const callTotalPremium = callBid * 100 * callEffectiveContracts
+  const putBreakEven = Math.max(0, putStrike - putBid)
+  const coveredCallBreakEven = Math.max(0, sharePrice - callBid)
+  const putMaxGain = putTotalPremium
+  const coveredCallMaxGain =
+    (callStrike - sharePrice + callBid) * 100 * callEffectiveContracts
+
+  const chartWindow = Math.max(oneSigmaValue * 3, sharePrice * 0.18, 10)
+  const chartStart = Math.max(0, sharePrice - chartWindow)
+  const chartEnd = Math.max(chartStart + 1, sharePrice + chartWindow)
+
+  const putPayoffPoints = buildPayoffPoints(
+    chartStart,
+    chartEnd,
+    40,
+    (price) => {
+      const perShareProfit = putBid - Math.max(0, putStrike - price)
+      return perShareProfit * 100 * putEffectiveContracts
+    },
+  )
+
+  const coveredCallPayoffPoints = buildPayoffPoints(
+    chartStart,
+    chartEnd,
+    40,
+    (price) => {
+      const stockAndCallProfit =
+        Math.min(price, callStrike) - sharePrice + callBid
+      return stockAndCallProfit * 100 * callEffectiveContracts
+    },
+  )
+
+  const isPutMode = form.mode === 'put'
+  const canFetchLiveQuote = symbol !== 'CUSTOM'
+  const activeStrike = isPutMode ? putStrike : callStrike
+  const activePremiumInput = isPutMode ? form.putBid : form.callBid
+  const activeSummaryMetrics = [
+    { label: 'Spot', value: formatCurrency(sharePrice) },
+    { label: '1-sigma', value: formatCurrency(oneSigmaValue) },
+    { label: 'Deployed BP', value: formatCurrency(deployedBuyingPower) },
+    { label: 'Target strike', value: formatCurrency(activeStrike) },
+  ]
+
+  const activeStrategy = isPutMode
+    ? {
+        accent: 'put' as const,
+        title: 'Short put',
+        subtitle: 'Sell put at bid',
+        strike: putStrike,
+        rawTarget: rawPutTarget,
+        contracts: putContracts,
+        effectiveContracts: putEffectiveContracts,
+        usingPreviewContract: putContracts === 0,
+        totalPremium: putTotalPremium,
+        breakEven: putBreakEven,
+        maxGain: putMaxGain,
+        capitalUsed: putCapitalUsed,
+        capitalLeft: putCapitalLeft,
+        footnote: 'Sizing uses rounded put strike x 100 shares.',
+        points: putPayoffPoints,
+      }
+    : {
+        accent: 'call' as const,
+        title: 'Covered call',
+        subtitle: 'Sell covered call at bid',
+        strike: callStrike,
+        rawTarget: rawCallTarget,
+        contracts: coveredCallContracts,
+        effectiveContracts: callEffectiveContracts,
+        usingPreviewContract: coveredCallContracts === 0,
+        totalPremium: callTotalPremium,
+        breakEven: coveredCallBreakEven,
+        maxGain: coveredCallMaxGain,
+        capitalUsed: coveredCallCapitalUsed,
+        capitalLeft: coveredCallCapitalLeft,
+        footnote: 'Sizing assumes shares are owned from current spot.',
+        points: coveredCallPayoffPoints,
+      }
+
+  function updateField<K extends keyof FormState>(field: K, value: FormState[K]) {
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+    }))
+  }
+
+  function handleNumericInput<K extends keyof Pick<
+    FormState,
+    | 'capital'
+    | 'usage'
+    | 'sharePrice'
+    | 'putAsk'
+    | 'callAsk'
+    | 'putBid'
+    | 'callBid'
+  >>(field: K, value: string) {
+    if (value === '' || /^(\d+)?(\.\d{0,2})?$/.test(value)) {
+      updateField(field, value as FormState[K])
+    }
+  }
+
+  function handleCustomSymbol(value: string) {
+    updateField(
+      'customSymbol',
+      value.toUpperCase().replace(/[^A-Z.]/g, '').slice(0, 8),
+    )
+  }
+
+  function resetForm() {
+    setForm(DEFAULT_FORM)
+  }
+
+  async function refreshLiveSpotPrice(targetSymbol = symbol) {
+    if (!targetSymbol || targetSymbol === 'CUSTOM') {
+      setQuoteStatus({
+        tone: 'error',
+        text: 'Pick a real ticker before pulling a live spot price.',
+      })
+      return
+    }
+
+    setIsQuoteLoading(true)
+    setQuoteStatus({
+      tone: 'loading',
+      text: `Pulling ${targetSymbol} live spot...`,
+    })
+
+    try {
+      const nextPrice = await fetchSpotQuote(targetSymbol, QUOTE_API_KEY)
+
+      updateField('sharePrice', nextPrice.toFixed(2) as FormState['sharePrice'])
+
+      const timestamp = new Intl.DateTimeFormat('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+      }).format(new Date())
+
+      setQuoteStatus({
+        tone: 'success',
+        text: `${targetSymbol} spot updated to ${formatCurrency(nextPrice)} at ${timestamp}.`,
+      })
+    } catch (error) {
+      setQuoteStatus({
+        tone: 'error',
+        text:
+          error instanceof Error
+            ? error.message
+            : 'Live spot quote failed to load.',
+      })
+    } finally {
+      setIsQuoteLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (form.symbol === 'CUSTOM') {
+      return
+    }
+
+    let ignore = false
+
+    async function autoRefreshSpotPrice() {
+      setIsQuoteLoading(true)
+      setQuoteStatus({
+        tone: 'loading',
+        text: `Pulling ${symbol} live spot...`,
+      })
+
+      try {
+        const nextPrice = await fetchSpotQuote(symbol, QUOTE_API_KEY)
+
+        if (ignore) {
+          return
+        }
+
+        updateField('sharePrice', nextPrice.toFixed(2) as FormState['sharePrice'])
+
+        const timestamp = new Intl.DateTimeFormat('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+        }).format(new Date())
+
+        setQuoteStatus({
+          tone: 'success',
+          text: `${symbol} spot updated to ${formatCurrency(nextPrice)} at ${timestamp}.`,
+        })
+      } catch (error) {
+        if (ignore) {
+          return
+        }
+
+        setQuoteStatus({
+          tone: 'error',
+          text:
+            error instanceof Error
+              ? error.message
+              : 'Live spot quote failed to load.',
+        })
+      } finally {
+        if (!ignore) {
+          setIsQuoteLoading(false)
+        }
+      }
+    }
+
+    void autoRefreshSpotPrice()
+
+    return () => {
+      ignore = true
+    }
+  }, [form.symbol, symbol])
+
+  return (
+    <>
+      <BackgroundMarketScene />
+
+      <main className="app-shell">
+        <section className="workspace-frame">
+          <aside className="controls-panel">
+            <header className="controls-head">
+              <div>
+                <p className="brand">Sigma Sell</p>
+                <h1>One Friday side at a time.</h1>
+              </div>
+              <button className="ghost-button" type="button" onClick={resetForm}>
+                Reset demo
+              </button>
+            </header>
+
+            <div className="mode-switch" aria-label="Trade side">
+              {MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={option.value === form.mode ? 'is-active' : ''}
+                  onClick={() => updateField('mode', option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            <p className="controls-note">
+              Show one ticket only. <strong>ASK</strong> finds the 1-sigma range.
+              <strong> Premium at selling price</strong> is the bid you can
+              actually hit.
+            </p>
+
+            <section className="control-section">
+              <div className="section-head">
+                <div>
+                  <p className="section-kicker">Setup</p>
+                  <h2>Stock and sizing</h2>
+                </div>
+              </div>
+
+              <div className="chip-row">
+                {QUICK_SYMBOLS.map((ticker) => (
+                  <button
+                    key={ticker}
+                    type="button"
+                    className={ticker === form.symbol ? 'chip-active' : ''}
+                    onClick={() => updateField('symbol', ticker)}
+                  >
+                    {ticker}
+                  </button>
+                ))}
+              </div>
+
+              <div className="symbol-picker">
+                <select
+                  value={form.symbol}
+                  onChange={(event) =>
+                    updateField('symbol', event.target.value as FormState['symbol'])
+                  }
+                >
+                  {SYMBOL_OPTIONS.map((ticker) => (
+                    <option key={ticker} value={ticker}>
+                      {ticker === 'CUSTOM' ? 'Custom symbol' : ticker}
+                    </option>
+                  ))}
+                </select>
+
+                {form.symbol === 'CUSTOM' && (
+                  <input
+                    type="text"
+                    value={form.customSymbol}
+                    onChange={(event) => handleCustomSymbol(event.target.value)}
+                    placeholder="E.g. COIN"
+                  />
+                )}
+              </div>
+
+              <div className="field-grid">
+                <label className="field">
+                  <span>Cash capital ($)</span>
+                  <input
+                    inputMode="decimal"
+                    type="text"
+                    value={form.capital}
+                    onChange={(event) =>
+                      handleNumericInput('capital', event.target.value)
+                    }
+                    placeholder="25000"
+                  />
+                </label>
+
+                <div className="field">
+                  <span>Broker leverage</span>
+                  <div className="segmented-control">
+                    {LEVERAGE_OPTIONS.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className={option === form.leverage ? 'is-active' : ''}
+                        onClick={() => updateField('leverage', option)}
+                      >
+                        {option}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="field field-full">
+                  <div className="field-row">
+                    <span>Buy power deployed</span>
+                    <strong>{formatDecimal(usage)}%</strong>
+                  </div>
+                  <input
+                    className="range-input"
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={usage}
+                    onChange={(event) => updateField('usage', event.target.value)}
+                  />
+                  <input
+                    className="range-value"
+                    inputMode="decimal"
+                    type="text"
+                    value={form.usage}
+                    onChange={(event) =>
+                      handleNumericInput('usage', event.target.value)
+                    }
+                    aria-label="Buy power percentage"
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section className="control-section">
+              <div className="section-head">
+                <div>
+                  <p className="section-kicker">1-sigma</p>
+                  <h2>Discovery range</h2>
+                </div>
+                <span className="section-tag">ASK only</span>
+              </div>
+
+              <div className="section-meta">
+                <button
+                  className="quote-button"
+                  type="button"
+                  onClick={() => {
+                    void refreshLiveSpotPrice()
+                  }}
+                  disabled={isQuoteLoading || !canFetchLiveQuote}
+                >
+                  {isQuoteLoading ? 'Refreshing spot...' : 'Fetch live spot'}
+                </button>
+                <span className={`quote-status quote-status-${quoteStatus.tone}`}>
+                  {quoteStatus.text}
+                </span>
+              </div>
+
+              <div className="field-grid">
+                <label className="field">
+                  <span>Spot price ($)</span>
+                  <input
+                    inputMode="decimal"
+                    type="text"
+                    value={form.sharePrice}
+                    onChange={(event) =>
+                      handleNumericInput('sharePrice', event.target.value)
+                    }
+                    placeholder="112.40"
+                  />
+                </label>
+
+                <div className="field">
+                  <span>Strike increment</span>
+                  <select
+                    value={form.strikeIncrement}
+                    onChange={(event) =>
+                      updateField(
+                        'strikeIncrement',
+                        event.target.value as FormState['strikeIncrement'],
+                      )
+                    }
+                  >
+                    {STRIKE_INCREMENT_OPTIONS.map((increment) => (
+                      <option key={increment} value={increment}>
+                        {increment}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <label className="field">
+                  <span>Put ask above spot ($)</span>
+                  <input
+                    inputMode="decimal"
+                    type="text"
+                    value={form.putAsk}
+                    onChange={(event) =>
+                      handleNumericInput('putAsk', event.target.value)
+                    }
+                    placeholder="2.18"
+                  />
+                </label>
+
+                <label className="field">
+                  <span>Call ask above spot ($)</span>
+                  <input
+                    inputMode="decimal"
+                    type="text"
+                    value={form.callAsk}
+                    onChange={(event) =>
+                      handleNumericInput('callAsk', event.target.value)
+                    }
+                    placeholder="2.44"
+                  />
+                </label>
+              </div>
+
+              <p className="field-note">
+                Live share prices are pulled with Alpha Vantage for the built-in
+                tickers and written straight into the spot field.
+              </p>
+
+              <div className="discovery-readout">
+                <div>
+                  <span>1-sigma move</span>
+                  <strong>{formatCurrency(oneSigmaValue)}</strong>
+                </div>
+                <div>
+                  <span>Put / Call targets</span>
+                  <strong>
+                    {formatCurrency(putStrike)} / {formatCurrency(callStrike)}
+                  </strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="control-section">
+              <div className="section-head">
+                <div>
+                  <p className="section-kicker">Premium</p>
+                  <h2>Premium at selling price</h2>
+                </div>
+                <span className="section-tag section-tag-live">BID</span>
+              </div>
+
+              <label className="field">
+                <span>Premium at selling price ($)</span>
+                <input
+                  inputMode="decimal"
+                  type="text"
+                  value={activePremiumInput}
+                  onChange={(event) =>
+                    handleNumericInput(isPutMode ? 'putBid' : 'callBid', event.target.value)
+                  }
+                  placeholder={isPutMode ? '1.12' : '1.34'}
+                />
+              </label>
+
+              <p className="section-note">
+                {isPutMode
+                  ? 'This is the premium you sell the put for.'
+                  : 'This is the premium you sell the covered call for.'}
+              </p>
+            </section>
+          </aside>
+
+          <section className={`result-panel result-panel-${activeStrategy.accent}`}>
+            <header className="result-head">
+              <div>
+                <p className="brand brand-light">{symbol}</p>
+                <h2>
+                  {isPutMode ? 'Short put ticket' : 'Covered call ticket'}
+                </h2>
+              </div>
+              <p className="result-note">
+                {isPutMode ? 'Downside income view' : 'Upside cap view'}
+              </p>
+            </header>
+
+            <div className="summary-strip">
+              {activeSummaryMetrics.map((metric) => (
+                <article key={metric.label} className="summary-metric">
+                  <span>{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                </article>
+              ))}
+            </div>
+
+            <StrategyPanel
+              accent={activeStrategy.accent}
+              title={activeStrategy.title}
+              subtitle={activeStrategy.subtitle}
+              strike={activeStrategy.strike}
+              rawTarget={activeStrategy.rawTarget}
+              contracts={activeStrategy.contracts}
+              effectiveContracts={activeStrategy.effectiveContracts}
+              usingPreviewContract={activeStrategy.usingPreviewContract}
+              totalPremium={activeStrategy.totalPremium}
+              breakEven={activeStrategy.breakEven}
+              maxGain={activeStrategy.maxGain}
+              capitalUsed={activeStrategy.capitalUsed}
+              capitalLeft={activeStrategy.capitalLeft}
+              footnote={activeStrategy.footnote}
+              points={activeStrategy.points}
+              spot={sharePrice}
+            />
+          </section>
+        </section>
+      </main>
+    </>
+  )
+}
+
+export default App
