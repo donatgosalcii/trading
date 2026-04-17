@@ -306,7 +306,6 @@
   color: #f8f3eb;
 }
 
-.symbol-picker,
 .field {
   display: grid;
   gap: 0.55rem;
@@ -339,8 +338,6 @@
   font-size: 0.8rem;
 }
 
-.symbol-picker input,
-.symbol-picker select,
 .field input,
 .field select,
 .range-value {
@@ -358,13 +355,10 @@
     background-color 180ms ease;
 }
 
-.symbol-picker input::placeholder,
 .field input::placeholder {
   color: rgba(246, 238, 228, 0.34);
 }
 
-.symbol-picker input:focus,
-.symbol-picker select:focus,
 .field input:focus,
 .field select:focus,
 .range-value:focus {
@@ -599,8 +593,6 @@
 .mode-switch button:focus-visible,
 .segmented-control button:focus-visible,
 .chip-row button:focus-visible,
-.symbol-picker input:focus-visible,
-.symbol-picker select:focus-visible,
 .field input:focus-visible,
 .field select:focus-visible {
   outline: 2px solid rgba(37, 217, 139, 0.34);

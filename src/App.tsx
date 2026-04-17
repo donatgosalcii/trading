@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import './App.css'
 
-const STORAGE_KEY = 'sigma-sell-calculator'
+const STORAGE_KEY = 'sigma-sell-calculator-v3'
 const QUOTE_API_ENDPOINT = 'https://www.alphavantage.co/query'
 const QUOTE_API_KEY = '59OVNKO3DEMVSCPQ'
 
-const SYMBOL_OPTIONS = [
+const STOCK_OPTIONS = [
   'NVDA',
   'AAPL',
   'AMD',
@@ -15,32 +15,27 @@ const SYMBOL_OPTIONS = [
   'SPY',
   'TSLA',
   'QQQ',
-  'CUSTOM',
 ] as const
-
-const QUICK_SYMBOLS = ['NVDA', 'AMD', 'INTC', 'AAPL', 'TSLA', 'SPY'] as const
 const LEVERAGE_OPTIONS = ['4', '6'] as const
-const STRIKE_INCREMENT_OPTIONS = ['0.5', '1', '2.5', '5'] as const
 const MODE_OPTIONS = [
   { value: 'put', label: 'Short put' },
   { value: 'call', label: 'Covered call' },
 ] as const
 
 type TradeMode = (typeof MODE_OPTIONS)[number]['value']
+type LeverageValue = '' | (typeof LEVERAGE_OPTIONS)[number]
 
 type FormState = {
   mode: TradeMode
   capital: string
-  leverage: (typeof LEVERAGE_OPTIONS)[number]
+  leverage: LeverageValue
   usage: string
-  symbol: (typeof SYMBOL_OPTIONS)[number]
-  customSymbol: string
+  symbol: (typeof STOCK_OPTIONS)[number]
   sharePrice: string
   putAsk: string
   callAsk: string
   putBid: string
   callBid: string
-  strikeIncrement: (typeof STRIKE_INCREMENT_OPTIONS)[number]
 }
 
 type PayoffPoint = {
@@ -81,17 +76,15 @@ type QuoteStatus = {
 
 const DEFAULT_FORM: FormState = {
   mode: 'put',
-  capital: '25000',
-  leverage: '4',
-  usage: '60',
+  capital: '',
+  leverage: '',
+  usage: '',
   symbol: 'NVDA',
-  customSymbol: '',
-  sharePrice: '112.40',
-  putAsk: '2.18',
-  callAsk: '2.44',
-  putBid: '1.12',
-  callBid: '1.34',
-  strikeIncrement: '1',
+  sharePrice: '',
+  putAsk: '',
+  callAsk: '',
+  putBid: '',
+  callBid: '',
 }
 
 const BACKDROP_CANDLES: MarketCandle[] = Array.from({ length: 34 }, (_, index) => {
@@ -574,17 +567,15 @@ function App() {
   const capital = Math.max(0, parseNumber(form.capital))
   const leverage = parseNumber(form.leverage)
   const usage = clampPercentage(parseNumber(form.usage))
+  const usageSliderValue = form.usage === '' ? '0' : String(usage)
   const sharePrice = Math.max(0, parseNumber(form.sharePrice))
   const putAsk = Math.max(0, parseNumber(form.putAsk))
   const callAsk = Math.max(0, parseNumber(form.callAsk))
   const putBid = Math.max(0, parseNumber(form.putBid))
   const callBid = Math.max(0, parseNumber(form.callBid))
-  const strikeIncrement = Math.max(0.5, parseNumber(form.strikeIncrement))
+  const strikeIncrement = 1
 
-  const symbol =
-    form.symbol === 'CUSTOM'
-      ? form.customSymbol.trim().toUpperCase() || 'CUSTOM'
-      : form.symbol
+  const symbol = form.symbol
 
   const totalBuyingPower = capital * leverage
   const deployedBuyingPower = totalBuyingPower * (usage / 100)
@@ -649,7 +640,7 @@ function App() {
   )
 
   const isPutMode = form.mode === 'put'
-  const canFetchLiveQuote = symbol !== 'CUSTOM'
+  const canFetchLiveQuote = true
   const activeStrike = isPutMode ? putStrike : callStrike
   const activePremiumInput = isPutMode ? form.putBid : form.callBid
   const activeSummaryMetrics = [
@@ -717,22 +708,15 @@ function App() {
     }
   }
 
-  function handleCustomSymbol(value: string) {
-    updateField(
-      'customSymbol',
-      value.toUpperCase().replace(/[^A-Z.]/g, '').slice(0, 8),
-    )
-  }
-
   function resetForm() {
     setForm(DEFAULT_FORM)
   }
 
   async function refreshLiveSpotPrice(targetSymbol = symbol) {
-    if (!targetSymbol || targetSymbol === 'CUSTOM') {
+    if (!targetSymbol) {
       setQuoteStatus({
         tone: 'error',
-        text: 'Pick a real ticker before pulling a live spot price.',
+        text: 'Pick a ticker before pulling a live spot price.',
       })
       return
     }
@@ -771,10 +755,6 @@ function App() {
   }
 
   useEffect(() => {
-    if (form.symbol === 'CUSTOM') {
-      return
-    }
-
     let ignore = false
 
     async function autoRefreshSpotPrice() {
@@ -873,7 +853,7 @@ function App() {
               </div>
 
               <div className="chip-row">
-                {QUICK_SYMBOLS.map((ticker) => (
+                {STOCK_OPTIONS.map((ticker) => (
                   <button
                     key={ticker}
                     type="button"
@@ -883,30 +863,6 @@ function App() {
                     {ticker}
                   </button>
                 ))}
-              </div>
-
-              <div className="symbol-picker">
-                <select
-                  value={form.symbol}
-                  onChange={(event) =>
-                    updateField('symbol', event.target.value as FormState['symbol'])
-                  }
-                >
-                  {SYMBOL_OPTIONS.map((ticker) => (
-                    <option key={ticker} value={ticker}>
-                      {ticker === 'CUSTOM' ? 'Custom symbol' : ticker}
-                    </option>
-                  ))}
-                </select>
-
-                {form.symbol === 'CUSTOM' && (
-                  <input
-                    type="text"
-                    value={form.customSymbol}
-                    onChange={(event) => handleCustomSymbol(event.target.value)}
-                    placeholder="E.g. COIN"
-                  />
-                )}
               </div>
 
               <div className="field-grid">
@@ -942,7 +898,9 @@ function App() {
                 <div className="field field-full">
                   <div className="field-row">
                     <span>Buy power deployed</span>
-                    <strong>{formatDecimal(usage)}%</strong>
+                    <strong>
+                      {form.usage === '' ? '—' : `${formatDecimal(usage)}%`}
+                    </strong>
                   </div>
                   <input
                     className="range-input"
@@ -950,7 +908,7 @@ function App() {
                     min="0"
                     max="100"
                     step="1"
-                    value={usage}
+                    value={usageSliderValue}
                     onChange={(event) => updateField('usage', event.target.value)}
                   />
                   <input
@@ -1005,25 +963,6 @@ function App() {
                     placeholder="112.40"
                   />
                 </label>
-
-                <div className="field">
-                  <span>Strike increment</span>
-                  <select
-                    value={form.strikeIncrement}
-                    onChange={(event) =>
-                      updateField(
-                        'strikeIncrement',
-                        event.target.value as FormState['strikeIncrement'],
-                      )
-                    }
-                  >
-                    {STRIKE_INCREMENT_OPTIONS.map((increment) => (
-                      <option key={increment} value={increment}>
-                        {increment}
-                      </option>
-                    ))}
-                  </select>
-                </div>
 
                 <label className="field">
                   <span>Put ask above spot ($)</span>
