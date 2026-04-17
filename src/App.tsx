@@ -3,7 +3,7 @@ import './App.css'
 
 const STORAGE_KEY = 'sigma-sell-calculator-v3'
 const QUOTE_API_ENDPOINT = 'https://www.alphavantage.co/query'
-const QUOTE_API_KEY = '59OVNKO3DEMVSCPQ'
+const QUOTE_API_KEY = '7469KBILPXSTONQ5'
 
 const STOCK_OPTIONS = [
   'NVDA',
@@ -21,9 +21,33 @@ const MODE_OPTIONS = [
   { value: 'put', label: 'Short put' },
   { value: 'call', label: 'Covered call' },
 ] as const
+const MOBILE_FLOW_STEPS = [
+  {
+    value: 'stock',
+    title: 'Pick the stock',
+    description: 'Start with the ticker. The live spot refresh follows the button you choose.',
+  },
+  {
+    value: 'sizing',
+    title: 'Set buying power',
+    description: 'Enter cash, pick the broker leverage, and decide how much buying power to deploy.',
+  },
+  {
+    value: 'discovery',
+    title: 'Find the range',
+    description: 'Use ASK to discover the 1-sigma move, then enter the premium you can actually sell at.',
+  },
+  {
+    value: 'results',
+    title: 'Review the trade',
+    description: 'See the target strike, projected premium, break-even, and payoff shape.',
+  },
+] as const
+const MOBILE_BREAKPOINT = '(max-width: 760px)'
 
 type TradeMode = (typeof MODE_OPTIONS)[number]['value']
 type LeverageValue = '' | (typeof LEVERAGE_OPTIONS)[number]
+type MobileFlowStep = (typeof MOBILE_FLOW_STEPS)[number]['value']
 
 type FormState = {
   mode: TradeMode
@@ -128,6 +152,10 @@ function parseNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+function hasValue(value: string) {
+  return value.trim() !== ''
+}
+
 function clampPercentage(value: number) {
   return Math.min(100, Math.max(0, value))
 }
@@ -195,6 +223,14 @@ function getInitialFormState() {
     window.localStorage.removeItem(STORAGE_KEY)
     return DEFAULT_FORM
   }
+}
+
+function getInitialIsMobileLayout() {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  return window.matchMedia(MOBILE_BREAKPOINT).matches
 }
 
 async function fetchSpotQuote(symbol: string, apiKey: string) {
@@ -554,11 +590,42 @@ function StrategyPanel({
 
 function App() {
   const [form, setForm] = useState<FormState>(getInitialFormState)
+  const [isMobileLayout, setIsMobileLayout] = useState(getInitialIsMobileLayout)
+  const [mobileStep, setMobileStep] = useState<MobileFlowStep>('stock')
   const [quoteStatus, setQuoteStatus] = useState<QuoteStatus>({
     tone: 'idle',
     text: 'Live spot pulls are ready.',
   })
   const [isQuoteLoading, setIsQuoteLoading] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined
+    }
+
+    const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT)
+    const handleChange = (event: MediaQueryListEvent) => {
+      setIsMobileLayout(event.matches)
+    }
+
+    setIsMobileLayout(mediaQuery.matches)
+    mediaQuery.addEventListener('change', handleChange)
+
+    return () => {
+      mediaQuery.removeEventListener('change', handleChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isMobileLayout) {
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+      document.scrollingElement?.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    })
+  }, [isMobileLayout, mobileStep])
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(form))
@@ -643,6 +710,37 @@ function App() {
   const canFetchLiveQuote = true
   const activeStrike = isPutMode ? putStrike : callStrike
   const activePremiumInput = isPutMode ? form.putBid : form.callBid
+  const mobileStepIndex = MOBILE_FLOW_STEPS.findIndex(
+    (step) => step.value === mobileStep,
+  )
+  const currentMobileStep = MOBILE_FLOW_STEPS[mobileStepIndex]
+  const isMobileResultsStep = isMobileLayout && mobileStep === 'results'
+  const showStockSection = !isMobileLayout || mobileStep === 'stock'
+  const showSizingSection = !isMobileLayout || mobileStep === 'sizing'
+  const showDiscoverySection = !isMobileLayout || mobileStep === 'discovery'
+  const showPremiumSection = !isMobileLayout || mobileStep === 'discovery'
+  const showResultsPanel = !isMobileLayout || mobileStep === 'results'
+  const isSizingStepComplete =
+    hasValue(form.capital) && hasValue(form.leverage) && hasValue(form.usage)
+  const isDiscoveryStepComplete =
+    hasValue(form.sharePrice) &&
+    hasValue(form.putAsk) &&
+    hasValue(form.callAsk) &&
+    hasValue(activePremiumInput)
+  const isCurrentMobileStepComplete =
+    mobileStep === 'stock'
+      ? true
+      : mobileStep === 'sizing'
+        ? isSizingStepComplete
+        : mobileStep === 'discovery'
+          ? isDiscoveryStepComplete
+          : true
+  const mobileStepRequirementMessage =
+    mobileStep === 'sizing'
+      ? 'Enter cash capital, broker leverage, and buy power deployed before continuing.'
+      : mobileStep === 'discovery'
+        ? 'Fill spot, both ASK values, and the selling premium before showing stats.'
+        : ''
   const activeSummaryMetrics = [
     { label: 'Spot', value: formatCurrency(sharePrice) },
     { label: '1-sigma', value: formatCurrency(oneSigmaValue) },
@@ -710,6 +808,24 @@ function App() {
 
   function resetForm() {
     setForm(DEFAULT_FORM)
+    setMobileStep('stock')
+  }
+
+  function goToMobileStep(nextStep: MobileFlowStep) {
+    setMobileStep(nextStep)
+  }
+
+  function goToNextMobileStep() {
+    const nextIndex = Math.min(
+      MOBILE_FLOW_STEPS.length - 1,
+      mobileStepIndex + 1,
+    )
+    setMobileStep(MOBILE_FLOW_STEPS[nextIndex].value)
+  }
+
+  function goToPreviousMobileStep() {
+    const previousIndex = Math.max(0, mobileStepIndex - 1)
+    setMobileStep(MOBILE_FLOW_STEPS[previousIndex].value)
   }
 
   async function refreshLiveSpotPrice(targetSymbol = symbol) {
@@ -814,14 +930,16 @@ function App() {
 
       <main className="app-shell">
         <section className="workspace-frame">
-          <aside className="controls-panel">
+          <aside
+            className={`controls-panel ${isMobileResultsStep ? 'controls-panel-mobile-results' : ''}`}
+          >
             <header className="controls-head">
               <div>
                 <p className="brand">Sigma Sell</p>
                 <h1>One Friday side at a time.</h1>
               </div>
               <button className="ghost-button" type="button" onClick={resetForm}>
-                Reset demo
+                Clear form
               </button>
             </header>
 
@@ -838,97 +956,150 @@ function App() {
               ))}
             </div>
 
-            <p className="controls-note">
-              Show one ticket only. <strong>ASK</strong> finds the 1-sigma range.
-              <strong> Premium at selling price</strong> is the bid you can
-              actually hit.
-            </p>
-
-            <section className="control-section">
-              <div className="section-head">
-                <div>
-                  <p className="section-kicker">Setup</p>
-                  <h2>Stock and sizing</h2>
+            {isMobileLayout ? (
+              <section className="mobile-step-overview">
+                <div className="mobile-step-copy">
+                  <p className="section-kicker">
+                    Step {mobileStepIndex + 1} of {MOBILE_FLOW_STEPS.length}
+                  </p>
+                  <h2>{currentMobileStep.title}</h2>
+                  <p className="section-note">{currentMobileStep.description}</p>
                 </div>
-              </div>
 
-              <div className="chip-row">
-                {STOCK_OPTIONS.map((ticker) => (
-                  <button
-                    key={ticker}
-                    type="button"
-                    className={ticker === form.symbol ? 'chip-active' : ''}
-                    onClick={() => updateField('symbol', ticker)}
-                  >
-                    {ticker}
-                  </button>
-                ))}
-              </div>
+                <div className="mobile-step-dots" aria-hidden="true">
+                  {MOBILE_FLOW_STEPS.map((step, index) => (
+                    <span
+                      key={step.value}
+                      className={[
+                        'mobile-step-dot',
+                        step.value === mobileStep ? 'is-active' : '',
+                        index < mobileStepIndex ? 'is-complete' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : (
+              <p className="controls-note">
+                Show one ticket only. <strong>ASK</strong> finds the 1-sigma
+                range. <strong> Premium at selling price</strong> is the bid you
+                can actually hit.
+              </p>
+            )}
 
-              <div className="field-grid">
-                <label className="field">
-                  <span>Cash capital ($)</span>
-                  <input
-                    inputMode="decimal"
-                    type="text"
-                    value={form.capital}
-                    onChange={(event) =>
-                      handleNumericInput('capital', event.target.value)
-                    }
-                    placeholder="25000"
-                  />
-                </label>
-
-                <div className="field">
-                  <span>Broker leverage</span>
-                  <div className="segmented-control">
-                    {LEVERAGE_OPTIONS.map((option) => (
-                      <button
-                        key={option}
-                        type="button"
-                        className={option === form.leverage ? 'is-active' : ''}
-                        onClick={() => updateField('leverage', option)}
-                      >
-                        {option}x
-                      </button>
-                    ))}
+            {showStockSection && (
+              <section className="control-section">
+                <div className="section-head">
+                  <div>
+                    <p className="section-kicker">Step 1</p>
+                    <h2>Pick stock</h2>
                   </div>
                 </div>
 
-                <div className="field field-full">
-                  <div className="field-row">
-                    <span>Buy power deployed</span>
-                    <strong>
-                      {form.usage === '' ? '—' : `${formatDecimal(usage)}%`}
-                    </strong>
-                  </div>
-                  <input
-                    className="range-input"
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="1"
-                    value={usageSliderValue}
-                    onChange={(event) => updateField('usage', event.target.value)}
-                  />
-                  <input
-                    className="range-value"
-                    inputMode="decimal"
-                    type="text"
-                    value={form.usage}
-                    onChange={(event) =>
-                      handleNumericInput('usage', event.target.value)
-                    }
-                    aria-label="Buy power percentage"
-                  />
-                </div>
-              </div>
-            </section>
+                <div className="chip-row">
+                  {STOCK_OPTIONS.map((ticker) => (
+                    <button
+                      key={ticker}
+                      type="button"
+                      className={ticker === form.symbol ? 'chip-active' : ''}
+                      onClick={() => {
+                        updateField('symbol', ticker)
 
-            <section className="control-section">
+                        if (isMobileLayout && mobileStep === 'stock') {
+                          goToMobileStep('sizing')
+                        }
+                      }}
+                    >
+                      {ticker}
+                    </button>
+                  ))}
+                </div>
+
+                <p className="field-note">
+                  The live spot pull stays tied to the stock button you choose.
+                </p>
+              </section>
+            )}
+
+            {showSizingSection && (
+              <section className="control-section">
+                <div className="section-head">
+                  <div>
+                    <p className="section-kicker">Step 2</p>
+                    <h2>Capital and leverage</h2>
+                  </div>
+                </div>
+
+                <div className="field-grid">
+                  <label className="field">
+                    <span>Cash capital ($)</span>
+                    <input
+                      inputMode="decimal"
+                      type="text"
+                      value={form.capital}
+                      onChange={(event) =>
+                        handleNumericInput('capital', event.target.value)
+                      }
+                      placeholder="25000"
+                    />
+                  </label>
+
+                  <div className="field">
+                    <span>Broker leverage</span>
+                    <div className="segmented-control">
+                      {LEVERAGE_OPTIONS.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          className={option === form.leverage ? 'is-active' : ''}
+                          onClick={() => updateField('leverage', option)}
+                        >
+                          {option}x
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="field field-full">
+                    <div className="field-row">
+                      <span>Buy power deployed</span>
+                      <strong>
+                        {form.usage === '' ? '—' : `${formatDecimal(usage)}%`}
+                      </strong>
+                    </div>
+                    <input
+                      className="range-input"
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={usageSliderValue}
+                      onChange={(event) =>
+                        updateField('usage', event.target.value)
+                      }
+                    />
+                    <input
+                      className="range-value"
+                      inputMode="decimal"
+                      type="text"
+                      value={form.usage}
+                      onChange={(event) =>
+                        handleNumericInput('usage', event.target.value)
+                      }
+                      aria-label="Buy power percentage"
+                    />
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {showDiscoverySection && (
+              <section className="control-section">
               <div className="section-head">
                 <div>
-                  <p className="section-kicker">1-sigma</p>
+                  <p className="section-kicker">Step 3</p>
                   <h2>Discovery range</h2>
                 </div>
                 <span className="section-tag">ASK only</span>
@@ -1009,8 +1180,10 @@ function App() {
                 </div>
               </div>
             </section>
+            )}
 
-            <section className="control-section">
+            {showPremiumSection && (
+              <section className="control-section control-section-compact">
               <div className="section-head">
                 <div>
                   <p className="section-kicker">Premium</p>
@@ -1038,9 +1211,69 @@ function App() {
                   : 'This is the premium you sell the covered call for.'}
               </p>
             </section>
+            )}
+
+            {isMobileResultsStep && (
+              <section className="control-section mobile-review-card">
+                <div className="section-head">
+                  <div>
+                    <p className="section-kicker">Step 4</p>
+                    <h2>Projected stats</h2>
+                  </div>
+                </div>
+
+                <p className="section-note">
+                  The trade ticket is live below. Go back one step if you want to
+                  adjust the range or premium.
+                </p>
+              </section>
+            )}
+
+            {isMobileLayout && (
+              <div className="mobile-flow-nav">
+                {mobileStepIndex > 0 ? (
+                  <button
+                    type="button"
+                    className="mobile-flow-button mobile-flow-button-secondary"
+                    onClick={goToPreviousMobileStep}
+                  >
+                    Back
+                  </button>
+                ) : (
+                  <div className="mobile-flow-spacer" />
+                )}
+
+                <button
+                  type="button"
+                  className="mobile-flow-button mobile-flow-button-primary"
+                  disabled={mobileStep !== 'results' && !isCurrentMobileStepComplete}
+                  onClick={
+                    mobileStep === 'results'
+                      ? () => goToMobileStep('discovery')
+                      : goToNextMobileStep
+                  }
+                >
+                  {mobileStep === 'stock' && 'Next: sizing'}
+                  {mobileStep === 'sizing' && 'Next: range'}
+                  {mobileStep === 'discovery' && 'Show stats'}
+                  {mobileStep === 'results' && 'Edit inputs'}
+                </button>
+              </div>
+            )}
+
+            {isMobileLayout &&
+              mobileStep !== 'results' &&
+              !isCurrentMobileStepComplete && (
+                <p className="mobile-flow-note">{mobileStepRequirementMessage}</p>
+              )}
           </aside>
 
-          <section className={`result-panel result-panel-${activeStrategy.accent}`}>
+          {showResultsPanel && (
+          <section
+            className={`result-panel result-panel-${activeStrategy.accent} ${
+              isMobileResultsStep ? 'result-panel-mobile-results' : ''
+            }`}
+          >
             <header className="result-head">
               <div>
                 <p className="brand brand-light">{symbol}</p>
@@ -1081,6 +1314,7 @@ function App() {
               spot={sharePrice}
             />
           </section>
+          )}
         </section>
       </main>
     </>

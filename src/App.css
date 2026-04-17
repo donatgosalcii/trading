@@ -198,6 +198,12 @@
   color: rgba(246, 238, 228, 0.72);
 }
 
+.mobile-step-overview,
+.mobile-flow-nav,
+.mobile-flow-note {
+  display: none;
+}
+
 .controls-note strong {
   color: #ffffff;
 }
@@ -243,6 +249,10 @@
   gap: 0.95rem;
   padding-top: 1rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.control-section-compact {
+  gap: 0.8rem;
 }
 
 .section-kicker {
@@ -660,6 +670,109 @@
 
   .result-panel {
     order: 2;
+  }
+
+  .result-panel-mobile-results {
+    order: 1;
+  }
+
+  .controls-panel-mobile-results {
+    order: 2;
+  }
+
+  .mobile-step-overview {
+    display: grid;
+    gap: 0.9rem;
+    padding: 0.15rem 0 0.1rem;
+  }
+
+  .mobile-step-copy {
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .mobile-step-copy h2 {
+    margin: 0;
+  }
+
+  .mobile-step-dots {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.45rem;
+  }
+
+  .mobile-step-dot {
+    height: 0.28rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .mobile-step-dot.is-complete {
+    background: rgba(37, 217, 139, 0.44);
+  }
+
+  .mobile-step-dot.is-active {
+    background: linear-gradient(90deg, rgba(243, 90, 115, 0.9), rgba(255, 156, 175, 0.94));
+    box-shadow: 0 0 18px rgba(243, 90, 115, 0.26);
+  }
+
+  .mobile-review-card {
+    padding-bottom: 0.25rem;
+  }
+
+  .mobile-flow-nav {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.7rem;
+    padding-top: 0.1rem;
+  }
+
+  .mobile-flow-button {
+    min-height: 3.1rem;
+    border-radius: 1rem;
+    border: 1px solid transparent;
+    font: inherit;
+    color: #f6eee4;
+    cursor: pointer;
+    transition:
+      transform 180ms ease,
+      background-color 180ms ease,
+      border-color 180ms ease;
+  }
+
+  .mobile-flow-button:hover,
+  .mobile-flow-button:focus-visible {
+    transform: translateY(-1px);
+  }
+
+  .mobile-flow-button:disabled {
+    cursor: not-allowed;
+    transform: none;
+    opacity: 0.46;
+    box-shadow: none;
+  }
+
+  .mobile-flow-button-secondary {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .mobile-flow-button-primary {
+    border-color: rgba(243, 90, 115, 0.16);
+    background: linear-gradient(135deg, rgba(243, 90, 115, 0.94), rgba(166, 39, 75, 0.96));
+    box-shadow: 0 18px 32px rgba(77, 12, 31, 0.28);
+  }
+
+  .mobile-flow-spacer {
+    min-height: 3.1rem;
+  }
+
+  .mobile-flow-note {
+    display: block;
+    margin: 0;
+    color: rgba(255, 156, 175, 0.92);
+    font-size: 0.8rem;
+    line-height: 1.45;
   }
 
   .controls-head,
