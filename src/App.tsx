@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import './App.css'
 
-const STORAGE_KEY = 'sigma-sell-calculator-v3'
-const QUOTE_API_ENDPOINT = 'https://www.alphavantage.co/query'
-const QUOTE_API_KEY = '7469KBILPXSTONQ5'
+const STORAGE_KEY = 'sigma-sell-calculator-v4'
+const OPTIONS_CHAIN_ENDPOINT = '/api/options-chain'
+const OPTIONS_CHAIN_SOURCE = 'manual'
 
 const STOCK_OPTIONS = [
   'NVDA',
@@ -25,7 +25,7 @@ const MOBILE_FLOW_STEPS = [
   {
     value: 'stock',
     title: 'Pick the stock',
-    description: 'Start with the ticker. The live spot refresh follows the button you choose.',
+    description: 'Start with the ticker. The option chain follows the button you choose.',
   },
   {
     value: 'sizing',
@@ -35,7 +35,7 @@ const MOBILE_FLOW_STEPS = [
   {
     value: 'discovery',
     title: 'Find the range',
-    description: 'Use ASK to discover the 1-sigma move, then enter the premium you can actually sell at.',
+    description: 'Pick the expiration and review the live chain values for the 1-sigma move.',
   },
   {
     value: 'results',
@@ -55,6 +55,7 @@ type FormState = {
   leverage: LeverageValue
   usage: string
   symbol: (typeof STOCK_OPTIONS)[number]
+  expiryEpoch: string
   sharePrice: string
   putAsk: string
   callAsk: string
@@ -98,12 +99,45 @@ type QuoteStatus = {
   text: string
 }
 
+type ExpiryDate = {
+  label: string
+  epoch: number
+}
+
+type ChainOption = {
+  strike: number
+  mid: number
+}
+
+type OptionsChainPayload = {
+  price?: number
+  atmCall?: number
+  atmPut?: number
+  strike?: number
+  iv?: number
+  currency?: string
+  expiryDates?: ExpiryDate[]
+  calls?: ChainOption[]
+  puts?: ChainOption[]
+  Information?: string
+  Note?: string
+  error?: string
+  message?: string
+}
+
+type ActiveChain = {
+  currency: string
+  calls: ChainOption[]
+  puts: ChainOption[]
+}
+
 const DEFAULT_FORM: FormState = {
   mode: 'put',
   capital: '',
   leverage: '',
   usage: '',
   symbol: 'NVDA',
+  expiryEpoch: '',
   sharePrice: '',
   putAsk: '',
   callAsk: '',
@@ -188,6 +222,54 @@ function formatInteger(value: number) {
   return integerFormatter.format(value)
 }
 
+function formatInputNumber(value: number) {
+  return value.toFixed(2)
+}
+
+function getOptionMidAtStrike(options: ChainOption[], strike: number) {
+  return options.find((option) => Math.abs(option.strike - strike) < 0.001)?.mid
+}
+
+function getClosestOptionStrike(
+  options: ChainOption[],
+  target: number,
+  direction: 'below' | 'above',
+) {
+  const strikes = options
+    .map((option) => option.strike)
+    .filter((strike) => Number.isFinite(strike))
+    .sort((a, b) => a - b)
+
+  if (strikes.length === 0) {
+    return undefined
+  }
+
+  if (direction === 'below') {
+    return [...strikes].reverse().find((strike) => strike <= target) ?? strikes[0]
+  }
+
+  return strikes.find((strike) => strike >= target) ?? strikes.at(-1)
+}
+
+function pickDefaultExpiry(expiryDates: ExpiryDate[]) {
+  const nowInSeconds = Date.now() / 1000
+  const futureExpiries = expiryDates.filter(
+    (expiryDate) => expiryDate.epoch >= nowInSeconds,
+  )
+
+  return (
+    futureExpiries.find(
+      (expiryDate) => new Date(`${expiryDate.label}T00:00:00Z`).getUTCDay() === 5,
+    ) ??
+    futureExpiries[0] ??
+    expiryDates[0]
+  )
+}
+
+function hasChainOptions(payload: OptionsChainPayload) {
+  return Array.isArray(payload.calls) && Array.isArray(payload.puts)
+}
+
 function buildPayoffPoints(
   start: number,
   end: number,
@@ -233,38 +315,25 @@ function getInitialIsMobileLayout() {
   return window.matchMedia(MOBILE_BREAKPOINT).matches
 }
 
-async function fetchSpotQuote(symbol: string, apiKey: string) {
+async function fetchOptionsChain(symbol: string, expiryEpoch?: string) {
   const params = new URLSearchParams({
-    function: 'GLOBAL_QUOTE',
-    apikey: apiKey,
-    symbol,
+    ticker: symbol,
+    source: OPTIONS_CHAIN_SOURCE,
   })
 
-  const response = await fetch(`${QUOTE_API_ENDPOINT}?${params.toString()}`)
-  const payload = (await response.json()) as {
-    'Error Message'?: string
-    Information?: string
-    Note?: string
-    'Global Quote'?: {
-      '05. price'?: string
-    }
+  if (expiryEpoch) {
+    params.set('expiry', expiryEpoch)
   }
 
-  const rawPrice = payload['Global Quote']?.['05. price']
-  const apiMessage =
-    payload.Note ?? payload.Information ?? payload['Error Message']
+  const response = await fetch(`${OPTIONS_CHAIN_ENDPOINT}?${params.toString()}`)
+  const payload = (await response.json()) as OptionsChainPayload
+  const apiMessage = payload.Note ?? payload.Information ?? payload.error ?? payload.message
 
-  if (!response.ok || apiMessage || typeof rawPrice !== 'string') {
-    throw new Error(apiMessage ?? 'Live spot quote is unavailable right now.')
+  if (!response.ok || apiMessage) {
+    throw new Error(apiMessage ?? 'Options chain is unavailable right now.')
   }
 
-  const price = Number(rawPrice)
-
-  if (!Number.isFinite(price)) {
-    throw new Error('Live spot quote returned an invalid price.')
-  }
-
-  return price
+  return payload
 }
 
 function BackgroundMarketScene() {
@@ -592,11 +661,13 @@ function App() {
   const [form, setForm] = useState<FormState>(getInitialFormState)
   const [isMobileLayout, setIsMobileLayout] = useState(getInitialIsMobileLayout)
   const [mobileStep, setMobileStep] = useState<MobileFlowStep>('stock')
-  const [quoteStatus, setQuoteStatus] = useState<QuoteStatus>({
+  const [chainStatus, setChainStatus] = useState<QuoteStatus>({
     tone: 'idle',
-    text: 'Live spot pulls are ready.',
+    text: 'Options chain is ready.',
   })
-  const [isQuoteLoading, setIsQuoteLoading] = useState(false)
+  const [isChainLoading, setIsChainLoading] = useState(false)
+  const [expiryDates, setExpiryDates] = useState<ExpiryDate[]>([])
+  const [activeChain, setActiveChain] = useState<ActiveChain | null>(null)
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -649,8 +720,14 @@ function App() {
   const oneSigmaValue = putAsk + callAsk
   const rawPutTarget = Math.max(0, sharePrice - oneSigmaValue)
   const rawCallTarget = sharePrice + oneSigmaValue
-  const putStrike = roundDownToIncrement(rawPutTarget, strikeIncrement)
-  const callStrike = roundUpToIncrement(rawCallTarget, strikeIncrement)
+  const chainPutStrike = activeChain
+    ? getClosestOptionStrike(activeChain.puts, rawPutTarget, 'below')
+    : undefined
+  const chainCallStrike = activeChain
+    ? getClosestOptionStrike(activeChain.calls, rawCallTarget, 'above')
+    : undefined
+  const putStrike = chainPutStrike ?? roundDownToIncrement(rawPutTarget, strikeIncrement)
+  const callStrike = chainCallStrike ?? roundUpToIncrement(rawCallTarget, strikeIncrement)
 
   const putContractBasis = putStrike * 100
   const coveredCallContractBasis = sharePrice * 100
@@ -707,9 +784,21 @@ function App() {
   )
 
   const isPutMode = form.mode === 'put'
-  const canFetchLiveQuote = true
+  const hasSelectedChainScope = hasValue(form.expiryEpoch) || activeChain !== null
+  const canRefreshChain = hasSelectedChainScope
   const activeStrike = isPutMode ? putStrike : callStrike
   const activePremiumInput = isPutMode ? form.putBid : form.callBid
+  const selectedExpiryLabel =
+    expiryDates.find((expiryDate) => String(expiryDate.epoch) === form.expiryEpoch)
+      ?.label ?? (form.expiryEpoch ? 'Selected expiry' : 'No expiry selected')
+  const putChainPremium =
+    activeChain && putStrike > 0
+      ? getOptionMidAtStrike(activeChain.puts, putStrike)
+      : undefined
+  const callChainPremium =
+    activeChain && callStrike > 0
+      ? getOptionMidAtStrike(activeChain.calls, callStrike)
+      : undefined
   const mobileStepIndex = MOBILE_FLOW_STEPS.findIndex(
     (step) => step.value === mobileStep,
   )
@@ -723,6 +812,7 @@ function App() {
   const isSizingStepComplete =
     hasValue(form.capital) && hasValue(form.leverage) && hasValue(form.usage)
   const isDiscoveryStepComplete =
+    hasSelectedChainScope &&
     hasValue(form.sharePrice) &&
     hasValue(form.putAsk) &&
     hasValue(form.callAsk) &&
@@ -739,7 +829,7 @@ function App() {
     mobileStep === 'sizing'
       ? 'Enter cash capital, broker leverage, and buy power deployed before continuing.'
       : mobileStep === 'discovery'
-        ? 'Fill spot, both ASK values, and the selling premium before showing stats.'
+        ? 'Pick an expiry, load the chain values, and confirm the selling premium before showing stats.'
         : ''
   const activeSummaryMetrics = [
     { label: 'Spot', value: formatCurrency(sharePrice) },
@@ -752,7 +842,7 @@ function App() {
     ? {
         accent: 'put' as const,
         title: 'Short put',
-        subtitle: 'Sell put at bid',
+        subtitle: 'Sell put premium',
         strike: putStrike,
         rawTarget: rawPutTarget,
         contracts: putContracts,
@@ -769,7 +859,7 @@ function App() {
     : {
         accent: 'call' as const,
         title: 'Covered call',
-        subtitle: 'Sell covered call at bid',
+        subtitle: 'Sell covered call premium',
         strike: callStrike,
         rawTarget: rawCallTarget,
         contracts: coveredCallContracts,
@@ -788,6 +878,13 @@ function App() {
     setForm((current) => ({
       ...current,
       [field]: value,
+    }))
+  }
+
+  function updateFields(fields: Partial<FormState>) {
+    setForm((current) => ({
+      ...current,
+      ...fields,
     }))
   }
 
@@ -828,101 +925,259 @@ function App() {
     setMobileStep(MOBILE_FLOW_STEPS[previousIndex].value)
   }
 
-  async function refreshLiveSpotPrice(targetSymbol = symbol) {
-    if (!targetSymbol) {
-      setQuoteStatus({
+  async function refreshSelectedOptionsChain() {
+    if (!hasSelectedChainScope) {
+      setChainStatus({
         tone: 'error',
-        text: 'Pick a ticker before pulling a live spot price.',
+        text: 'Pick an expiry before refreshing the chain.',
       })
       return
     }
 
-    setIsQuoteLoading(true)
-    setQuoteStatus({
+    setIsChainLoading(true)
+    setChainStatus({
       tone: 'loading',
-      text: `Pulling ${targetSymbol} live spot...`,
+      text: `Loading ${symbol} ${selectedExpiryLabel} chain...`,
     })
 
     try {
-      const nextPrice = await fetchSpotQuote(targetSymbol, QUOTE_API_KEY)
+      const payload = await fetchOptionsChain(symbol, form.expiryEpoch || undefined)
 
-      updateField('sharePrice', nextPrice.toFixed(2) as FormState['sharePrice'])
+      if (!hasChainOptions(payload)) {
+        throw new Error('Options chain returned without calls and puts.')
+      }
 
-      const timestamp = new Intl.DateTimeFormat('en-US', {
-        hour: 'numeric',
-        minute: '2-digit',
-      }).format(new Date())
+      setActiveChain({
+        currency: payload.currency ?? 'USD',
+        calls: payload.calls ?? [],
+        puts: payload.puts ?? [],
+      })
 
-      setQuoteStatus({
+      updateFields({
+        sharePrice:
+          typeof payload.price === 'number'
+            ? formatInputNumber(payload.price)
+            : form.sharePrice,
+        putAsk:
+          typeof payload.atmPut === 'number'
+            ? formatInputNumber(payload.atmPut)
+            : form.putAsk,
+        callAsk:
+          typeof payload.atmCall === 'number'
+            ? formatInputNumber(payload.atmCall)
+            : form.callAsk,
+      })
+
+      setChainStatus({
         tone: 'success',
-        text: `${targetSymbol} spot updated to ${formatCurrency(nextPrice)} at ${timestamp}.`,
+        text: `${symbol} ${selectedExpiryLabel} chain loaded.`,
       })
     } catch (error) {
-      setQuoteStatus({
+      setChainStatus({
         tone: 'error',
         text:
           error instanceof Error
             ? error.message
-            : 'Live spot quote failed to load.',
+            : 'Options chain failed to load.',
       })
     } finally {
-      setIsQuoteLoading(false)
+      setIsChainLoading(false)
     }
   }
 
   useEffect(() => {
     let ignore = false
 
-    async function autoRefreshSpotPrice() {
-      setIsQuoteLoading(true)
-      setQuoteStatus({
+    async function loadExpiryChoices() {
+      setIsChainLoading(true)
+      setChainStatus({
         tone: 'loading',
-        text: `Pulling ${symbol} live spot...`,
+        text: `Loading ${symbol} expiries...`,
       })
 
       try {
-        const nextPrice = await fetchSpotQuote(symbol, QUOTE_API_KEY)
+        const payload = await fetchOptionsChain(symbol)
 
         if (ignore) {
           return
         }
 
-        updateField('sharePrice', nextPrice.toFixed(2) as FormState['sharePrice'])
+        if (hasChainOptions(payload)) {
+          setExpiryDates([])
+          setActiveChain({
+            currency: payload.currency ?? 'USD',
+            calls: payload.calls ?? [],
+            puts: payload.puts ?? [],
+          })
+          setForm((current) => ({
+            ...current,
+            expiryEpoch: '',
+            sharePrice:
+              typeof payload.price === 'number'
+                ? formatInputNumber(payload.price)
+                : current.sharePrice,
+            putAsk:
+              typeof payload.atmPut === 'number'
+                ? formatInputNumber(payload.atmPut)
+                : current.putAsk,
+            callAsk:
+              typeof payload.atmCall === 'number'
+                ? formatInputNumber(payload.atmCall)
+                : current.callAsk,
+          }))
+          setChainStatus({
+            tone: 'success',
+            text: `${symbol} chain loaded.`,
+          })
+          return
+        }
 
-        const timestamp = new Intl.DateTimeFormat('en-US', {
-          hour: 'numeric',
-          minute: '2-digit',
-        }).format(new Date())
+        const nextExpiryDates = payload.expiryDates ?? []
+        const defaultExpiry = pickDefaultExpiry(nextExpiryDates)
 
-        setQuoteStatus({
-          tone: 'success',
-          text: `${symbol} spot updated to ${formatCurrency(nextPrice)} at ${timestamp}.`,
+        setExpiryDates(nextExpiryDates)
+        setActiveChain(null)
+        setForm((current) => ({
+          ...current,
+          expiryEpoch: defaultExpiry ? String(defaultExpiry.epoch) : '',
+          sharePrice:
+            typeof payload.price === 'number'
+              ? formatInputNumber(payload.price)
+              : current.sharePrice,
+        }))
+
+        setChainStatus({
+          tone: defaultExpiry ? 'success' : 'error',
+          text: defaultExpiry
+            ? `${symbol} expiries loaded.`
+            : `${symbol} expiries are unavailable.`,
         })
       } catch (error) {
         if (ignore) {
           return
         }
 
-        setQuoteStatus({
+        setExpiryDates([])
+        setActiveChain(null)
+        setChainStatus({
           tone: 'error',
           text:
             error instanceof Error
               ? error.message
-              : 'Live spot quote failed to load.',
+              : 'Options expiries failed to load.',
         })
       } finally {
         if (!ignore) {
-          setIsQuoteLoading(false)
+          setIsChainLoading(false)
         }
       }
     }
 
-    void autoRefreshSpotPrice()
+    void loadExpiryChoices()
 
     return () => {
       ignore = true
     }
-  }, [form.symbol, symbol])
+  }, [symbol])
+
+  useEffect(() => {
+    if (!form.expiryEpoch) {
+      return undefined
+    }
+
+    let ignore = false
+
+    async function loadSelectedChain() {
+      setIsChainLoading(true)
+      setChainStatus({
+        tone: 'loading',
+        text: `Loading ${symbol} ${selectedExpiryLabel} chain...`,
+      })
+
+      try {
+        const payload = await fetchOptionsChain(symbol, form.expiryEpoch)
+
+        if (ignore) {
+          return
+        }
+
+        if (!hasChainOptions(payload)) {
+          throw new Error('Options chain returned without calls and puts.')
+        }
+
+        setActiveChain({
+          currency: payload.currency ?? 'USD',
+          calls: payload.calls ?? [],
+          puts: payload.puts ?? [],
+        })
+        setForm((current) => ({
+          ...current,
+          sharePrice:
+            typeof payload.price === 'number'
+              ? formatInputNumber(payload.price)
+              : current.sharePrice,
+          putAsk:
+            typeof payload.atmPut === 'number'
+              ? formatInputNumber(payload.atmPut)
+              : current.putAsk,
+          callAsk:
+            typeof payload.atmCall === 'number'
+              ? formatInputNumber(payload.atmCall)
+              : current.callAsk,
+        }))
+        setChainStatus({
+          tone: 'success',
+          text: `${symbol} ${selectedExpiryLabel} chain loaded.`,
+        })
+      } catch (error) {
+        if (ignore) {
+          return
+        }
+
+        setActiveChain(null)
+        setChainStatus({
+          tone: 'error',
+          text:
+            error instanceof Error
+              ? error.message
+              : 'Options chain failed to load.',
+        })
+      } finally {
+        if (!ignore) {
+          setIsChainLoading(false)
+        }
+      }
+    }
+
+    void loadSelectedChain()
+
+    return () => {
+      ignore = true
+    }
+  }, [form.expiryEpoch, selectedExpiryLabel, symbol])
+
+  useEffect(() => {
+    if (!activeChain) {
+      return
+    }
+
+    const nextPutPremium =
+      putStrike > 0 ? getOptionMidAtStrike(activeChain.puts, putStrike) : undefined
+    const nextCallPremium =
+      callStrike > 0 ? getOptionMidAtStrike(activeChain.calls, callStrike) : undefined
+
+    setForm((current) => ({
+      ...current,
+      putBid:
+        typeof nextPutPremium === 'number'
+          ? formatInputNumber(nextPutPremium)
+          : current.putBid,
+      callBid:
+        typeof nextCallPremium === 'number'
+          ? formatInputNumber(nextCallPremium)
+          : current.callBid,
+    }))
+  }, [activeChain, callStrike, putStrike])
 
   return (
     <>
@@ -983,9 +1238,9 @@ function App() {
               </section>
             ) : (
               <p className="controls-note">
-                Show one ticket only. <strong>ASK</strong> finds the 1-sigma
-                range. <strong> Premium at selling price</strong> is the bid you
-                can actually hit.
+                Show one ticket only. <strong>Chain mids</strong> find the
+                1-sigma range. <strong> Premium at selling price</strong> stays
+                editable for your broker fill.
               </p>
             )}
 
@@ -1005,7 +1260,17 @@ function App() {
                       type="button"
                       className={ticker === form.symbol ? 'chip-active' : ''}
                       onClick={() => {
-                        updateField('symbol', ticker)
+                        setActiveChain(null)
+                        setExpiryDates([])
+                        updateFields({
+                          symbol: ticker,
+                          expiryEpoch: '',
+                          sharePrice: '',
+                          putAsk: '',
+                          callAsk: '',
+                          putBid: '',
+                          callBid: '',
+                        })
 
                         if (isMobileLayout && mobileStep === 'stock') {
                           goToMobileStep('sizing')
@@ -1018,7 +1283,7 @@ function App() {
                 </div>
 
                 <p className="field-note">
-                  The live spot pull stays tied to the stock button you choose.
+                  The options chain stays tied to the stock button you choose.
                 </p>
               </section>
             )}
@@ -1102,7 +1367,7 @@ function App() {
                   <p className="section-kicker">Step 3</p>
                   <h2>Discovery range</h2>
                 </div>
-                <span className="section-tag">ASK only</span>
+                <span className="section-tag">Chain data</span>
               </div>
 
               <div className="section-meta">
@@ -1110,18 +1375,42 @@ function App() {
                   className="quote-button"
                   type="button"
                   onClick={() => {
-                    void refreshLiveSpotPrice()
+                    void refreshSelectedOptionsChain()
                   }}
-                  disabled={isQuoteLoading || !canFetchLiveQuote}
+                  disabled={isChainLoading || !canRefreshChain}
                 >
-                  {isQuoteLoading ? 'Refreshing spot...' : 'Fetch live spot'}
+                  {isChainLoading ? 'Loading chain...' : 'Refresh chain'}
                 </button>
-                <span className={`quote-status quote-status-${quoteStatus.tone}`}>
-                  {quoteStatus.text}
+                <span className={`quote-status quote-status-${chainStatus.tone}`}>
+                  {chainStatus.text}
                 </span>
               </div>
 
               <div className="field-grid">
+                <label className="field field-full">
+                  <span>Expiration date</span>
+                  <select
+                    value={form.expiryEpoch}
+                    onChange={(event) =>
+                      updateField('expiryEpoch', event.target.value)
+                    }
+                    disabled={isChainLoading || expiryDates.length === 0}
+                  >
+                    {expiryDates.length === 0 ? (
+                      <option value="">Latest chain</option>
+                    ) : (
+                      expiryDates.map((expiryDate) => (
+                        <option
+                          key={expiryDate.epoch}
+                          value={String(expiryDate.epoch)}
+                        >
+                          {expiryDate.label}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+
                 <label className="field">
                   <span>Spot price ($)</span>
                   <input
@@ -1136,7 +1425,7 @@ function App() {
                 </label>
 
                 <label className="field">
-                  <span>Put ask above spot ($)</span>
+                  <span>ATM put mid ($)</span>
                   <input
                     inputMode="decimal"
                     type="text"
@@ -1149,7 +1438,7 @@ function App() {
                 </label>
 
                 <label className="field">
-                  <span>Call ask above spot ($)</span>
+                  <span>ATM call mid ($)</span>
                   <input
                     inputMode="decimal"
                     type="text"
@@ -1163,8 +1452,8 @@ function App() {
               </div>
 
               <p className="field-note">
-                Live share prices are pulled with Alpha Vantage for the built-in
-                tickers and written straight into the spot field.
+                Spot, ATM mids, target strikes, and target premium estimates are
+                filled from the selected options chain.
               </p>
 
               <div className="discovery-readout">
@@ -1189,7 +1478,7 @@ function App() {
                   <p className="section-kicker">Premium</p>
                   <h2>Premium at selling price</h2>
                 </div>
-                <span className="section-tag section-tag-live">BID</span>
+                <span className="section-tag section-tag-live">MID</span>
               </div>
 
               <label className="field">
@@ -1207,8 +1496,16 @@ function App() {
 
               <p className="section-note">
                 {isPutMode
-                  ? 'This is the premium you sell the put for.'
-                  : 'This is the premium you sell the covered call for.'}
+                  ? `Auto-filled from the ${formatCurrency(putStrike)} put mid${
+                      typeof putChainPremium === 'number'
+                        ? ` (${formatCurrency(putChainPremium)})`
+                        : ''
+                    }.`
+                  : `Auto-filled from the ${formatCurrency(callStrike)} call mid${
+                      typeof callChainPremium === 'number'
+                        ? ` (${formatCurrency(callChainPremium)})`
+                        : ''
+                    }.`}
               </p>
             </section>
             )}
