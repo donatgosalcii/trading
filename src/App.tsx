@@ -138,7 +138,7 @@ const DEFAULT_FORM: FormState = {
   mode: 'put',
   capital: '',
   leverage: '',
-  usage: '',
+  usage: '60',
   symbol: 'NVDA',
   expiryEpoch: '',
   sharePrice: '',
