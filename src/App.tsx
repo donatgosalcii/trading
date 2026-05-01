@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import './App.css'
 
 const STORAGE_KEY = 'sigma-sell-calculator-v4'
-const OPTIONS_CHAIN_ENDPOINT = '/api/options-chain'
+const LOCAL_OPTIONS_CHAIN_ENDPOINT = '/api/options-chain'
+const REMOTE_OPTIONS_CHAIN_ENDPOINT =
+  'https://www.gosalci.com/api/options-chain'
 const OPTIONS_CHAIN_SOURCE = 'manual'
 
 const STOCK_OPTIONS = [
@@ -315,6 +317,18 @@ function getInitialIsMobileLayout() {
   return window.matchMedia(MOBILE_BREAKPOINT).matches
 }
 
+function getOptionsChainEndpoint() {
+  if (typeof window === 'undefined') {
+    return LOCAL_OPTIONS_CHAIN_ENDPOINT
+  }
+
+  const isLocalHost =
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1'
+
+  return isLocalHost ? LOCAL_OPTIONS_CHAIN_ENDPOINT : REMOTE_OPTIONS_CHAIN_ENDPOINT
+}
+
 async function fetchOptionsChain(symbol: string, expiryEpoch?: string) {
   const params = new URLSearchParams({
     ticker: symbol,
@@ -325,7 +339,7 @@ async function fetchOptionsChain(symbol: string, expiryEpoch?: string) {
     params.set('expiry', expiryEpoch)
   }
 
-  const response = await fetch(`${OPTIONS_CHAIN_ENDPOINT}?${params.toString()}`)
+  const response = await fetch(`${getOptionsChainEndpoint()}?${params.toString()}`)
   const payload = (await response.json()) as OptionsChainPayload
   const apiMessage = payload.Note ?? payload.Information ?? payload.error ?? payload.message
 
