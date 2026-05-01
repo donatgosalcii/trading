@@ -1,0 +1,3 @@
+name = "trading-options-chain-proxy"
+main = "options-chain-proxy.js"
+compatibility_date = "2025-01-01"

@@ -4,6 +4,7 @@ import './App.css'
 const STORAGE_KEY = 'sigma-sell-calculator-v4'
 const LOCAL_OPTIONS_CHAIN_ENDPOINT = '/api/options-chain'
 const REMOTE_OPTIONS_CHAIN_ENDPOINT =
+  import.meta.env.VITE_OPTIONS_CHAIN_ENDPOINT?.trim() ||
   'https://www.gosalci.com/api/options-chain'
 const OPTIONS_CHAIN_SOURCE = 'manual'
 

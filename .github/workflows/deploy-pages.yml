@@ -31,6 +31,8 @@ jobs:
         run: npm ci
 
       - name: Build
+        env:
+          VITE_OPTIONS_CHAIN_ENDPOINT: ${{ vars.VITE_OPTIONS_CHAIN_ENDPOINT }}
         run: npm run build
 
       - name: Setup Pages
